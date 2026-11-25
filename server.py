@@ -9,6 +9,7 @@ import os
 import random
 import re
 import socket
+import sys
 import tempfile
 import time
 import uuid
@@ -23,6 +24,8 @@ from starlette.staticfiles import StaticFiles
 from PIL import Image
 from samsungtvws import SamsungTVWS
 from samsungtvws.exceptions import ConnectionFailure, ResponseError
+
+import library_routes
 
 try:
     from dotenv import load_dotenv
@@ -56,6 +59,9 @@ API_USAGE_FILE = DATA_DIR / "api_usage.json"
 DRIVE_SYNC_FILE = DATA_DIR / "drive_sync.json"
 ATMOSPHERE_HISTORY_FILE = DATA_DIR / "atmosphere_history.json"
 ATMOSPHERE_HISTORY_MAX = 200
+# Folder library: each sub-folder is a collection that can be put on the TV.
+LIBRARY_DIR = Path(os.environ["DOCENT_LIBRARY_DIR"]) if os.environ.get("DOCENT_LIBRARY_DIR") else None
+LIBRARY_STATE_FILE = DATA_DIR / "library_state.json"
 
 
 def _safe_load_json(path: Path, default_factory) -> dict:
@@ -390,6 +396,11 @@ async def log_requests(request: Request, call_next):
     duration = time.time() - start
     log.info("%s %s %d %.2fs", request.method, request.url.path, response.status_code, duration)
     return response
+
+
+# Passing this module in avoids a circular import, including under
+# ``python server.py`` where it is named ``__main__``.
+app.include_router(library_routes.build_router(sys.modules[__name__]))
 
 
 # --- Static frontend ---
