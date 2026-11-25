@@ -162,6 +162,16 @@ Copy `.env.example` to `.env` and edit:
 
 API keys for Claude, OpenAI, and Google Vision are managed through the Settings modal in the browser — not via environment variables or config files. Settings are stored locally in `ai_config.json` (auto-created, git-ignored).
 
+## Local Library
+
+Switch between **On the TV** and **Local Library** at the top of the page. In Local Library, click **Change…** to choose a folder (a network share works). In a browser on Docent's own Mac this opens the macOS folder dialog; elsewhere it shows a folder list. In the chosen folder, each sub-folder of JPEG or PNG images is a collection. `DOCENT_LIBRARY_DIR` sets the default folder.
+
+- **Load** adds images to the Frame and removes nothing.
+- **Unload** removes them from the Frame; your files are not changed.
+- **Replace TV contents** makes My Photos match your selection and starts the TV's own slideshow. TV images with no library copy are only removed if you tick the box.
+
+Docent only needs to run while one of these is in progress. Images that aren't 16:9 are cropped using the crop you chose when uploading a file of the same name, otherwise from the centre. A browser collection with the same name as a folder is updated to match it.
+
 ## Project Structure
 
 ```
@@ -175,7 +185,7 @@ docent/
   .env.example       # Environment variable template
 ```
 
-Data files are auto-created on first run and git-ignored: `.tv-token`, `ai_config.json`, `api_usage.json`, `drive_sync.json`, `artwork_meta.json`, `collections.json`.
+Data files are auto-created on first run and git-ignored: `.tv-token`, `ai_config.json`, `api_usage.json`, `drive_sync.json`, `artwork_meta.json`, `collections.json`, `library_state.json`.
 
 ## Docker
 

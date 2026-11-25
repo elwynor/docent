@@ -139,3 +139,10 @@ def test_collection_menu_stacks_above_group_nav():
         return int(re.search(r"z-index:\s*(\d+)", block).group(1))
 
     assert z_index(".collection-dropdown-menu") > z_index(".group-nav")
+
+
+@pytest.mark.parametrize("button", ["libraryLoad", "libraryUnload", "libraryReplace"])
+def test_library_actions_explain_themselves_on_hover(button):
+    script = (INDEX_HTML.parent / "assets" / "js" / "library.js").read_text()
+
+    assert re.search(rf"\$\('{button}'\)\.title = ", script)
