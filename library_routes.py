@@ -10,8 +10,6 @@ import base64
 import hashlib
 import io
 import logging
-import shutil
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +18,7 @@ from fastapi.responses import Response
 from PIL import Image, ImageOps
 from samsungtvws.exceptions import ConnectionFailure
 
+import folder_dialog
 import library
 import library_files
 
@@ -30,18 +29,7 @@ _THUMB_SIZE = (480, 270)
 _PREVIEW_SIZE = (1600, 1600)
 MAX_FILE_BYTES = 100 * 1024 * 1024  # per image added to the library
 # The folder picker and the saved library folder are limited to these places.
-BROWSE_ROOTS = [Path.home(), Path("/Volumes")]
-
-# Arguments are passed to the script, never spliced into it.
-_CHOOSER_SCRIPT = """on run argv
-    activate
-    if (count of argv) > 0 then
-        set chosen to choose folder with prompt "Choose your Docent library folder" default location (POSIX file (item 1 of argv))
-    else
-        set chosen to choose folder with prompt "Choose your Docent library folder"
-    end if
-    return POSIX path of chosen
-end run"""
+BROWSE_ROOTS = folder_dialog.browse_roots()
 
 srv = None  # the server module, set by build_router()
 job: dict = {"state": "idle"}
@@ -400,36 +388,17 @@ def _summary() -> dict:
 def _browsable(path: str) -> Path:
     resolved = Path(path).resolve()
     if not any(resolved.is_relative_to(base.resolve()) for base in BROWSE_ROOTS):
-        raise HTTPException(403, "Choose a folder in your home folder or under /Volumes")
+        places = ", ".join(str(base) for base in BROWSE_ROOTS)
+        raise HTTPException(403, f"Choose a folder inside one of: {places}")
     if not resolved.is_dir():
         raise HTTPException(404, "No such folder")
     return resolved
 
 
-def _chooser_available() -> bool:
-    return sys.platform == "darwin" and shutil.which("osascript") is not None
-
-
 def _can_pick(request: Request) -> bool:
     """The dialog opens on Docent's computer, so only offer it to a browser there."""
     local = request.client is not None and request.client.host in ("127.0.0.1", "::1")
-    return local and _chooser_available()
-
-
-async def _run_chooser(start: Path | None) -> tuple[int, str, str]:
-    """Show the macOS folder dialog; return ``(exit code, stdout, stderr)``."""
-    args = [str(start)] if start else []
-    process = await asyncio.create_subprocess_exec(
-        "osascript", "-e", _CHOOSER_SCRIPT, *args,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        out, err = await asyncio.wait_for(process.communicate(), timeout=600)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        return 1, "", "User canceled. (-128)"
-    return process.returncode, out.decode(), err.decode()
+    return local and folder_dialog.available()
 
 
 def _save_root(folder: Path) -> None:
@@ -586,13 +555,14 @@ def build_router(server_module) -> APIRouter:
             raise HTTPException(409, "The folder dialog is already open")
         async with chooser_lock:
             current = _root()
-            code, out, err = await _run_chooser(current if _available(current) else None)
-        cancelled = code != 0 and "-128" in err
-        if code != 0 and not cancelled:
-            log.warning("Folder dialog failed: %s", err.strip())
-            raise HTTPException(500, "Could not open the folder dialog")
+            try:
+                chosen = await folder_dialog.pick(str(current) if _available(current) else None)
+            except folder_dialog.DialogError as e:
+                log.warning("Folder dialog failed: %s", e)
+                raise HTTPException(500, "Could not open the folder dialog")
+        cancelled = chosen is None
         if not cancelled:
-            folder = Path(out.rstrip("\n"))
+            folder = Path(chosen)
             if not folder.is_absolute() or not folder.is_dir():
                 raise HTTPException(400, "That is not a folder Docent can read")
             _check_idle()
@@ -618,7 +588,9 @@ def build_router(server_module) -> APIRouter:
         except OSError as e:
             raise HTTPException(403, f"Cannot open that folder: {e.strerror}")
         parent = folder.parent
-        allowed = any(parent.is_relative_to(base.resolve()) for base in BROWSE_ROOTS)
+        # The top of a drive is its own parent.
+        allowed = parent != folder and any(
+            parent.is_relative_to(base.resolve()) for base in BROWSE_ROOTS)
         return {"path": str(folder), "parent": str(parent) if allowed else None,
                 "folders": folders, "places": [str(base) for base in BROWSE_ROOTS]}
 

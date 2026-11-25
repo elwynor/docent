@@ -7,6 +7,7 @@ import json
 import pytest
 from PIL import Image, ImageDraw
 
+import folder_dialog
 import library_routes
 import server
 
@@ -337,40 +338,40 @@ async def test_folder_browser_stays_inside_allowed_places(client, lib, tmp_path,
 
 @pytest.fixture
 def chooser(monkeypatch):
-    """Stand in for the macOS folder dialog."""
-    calls = {"start": None, "result": (0, "", "")}
+    """Stand in for the operating system's folder dialog."""
+    calls = {"start": None, "result": None, "error": None}
 
-    async def _run(start):
+    async def _pick(start):
         calls["start"] = start
+        if calls["error"]:
+            raise folder_dialog.DialogError(calls["error"])
         return calls["result"]
 
-    monkeypatch.setattr(library_routes, "_chooser_available", lambda: True)
-    monkeypatch.setattr(library_routes, "_run_chooser", _run)
+    monkeypatch.setattr(folder_dialog, "available", lambda: True)
+    monkeypatch.setattr(folder_dialog, "pick", _pick)
     return calls
 
 
 async def test_chooser_saves_the_picked_folder(client, lib, chooser, tmp_path):
     picked = tmp_path / "picked"
     (picked / "Spring").mkdir(parents=True)
-    chooser["result"] = (0, f"{picked}/\n", "")
+    chooser["result"] = f"{picked}/"
 
     data = (await client.post("/api/library/pick", json={})).json()
 
     assert data["root"] == str(picked) and data["cancelled"] is False
-    assert chooser["start"] == lib  # opens at the current folder
+    assert chooser["start"] == str(lib)  # opens at the current folder
     assert (await client.get("/api/library")).json()["root"] == str(picked)
 
 
 async def test_cancelling_the_chooser_changes_nothing(client, lib, chooser):
-    chooser["result"] = (1, "", "execution error: User canceled. (-128)")
-
     data = (await client.post("/api/library/pick", json={})).json()
 
     assert data["cancelled"] is True and data["root"] == str(lib)
 
 
 async def test_chooser_failure_is_reported(client, lib, chooser):
-    chooser["result"] = (1, "", "execution error: no window server (-1712)")
+    chooser["error"] = "no window server"
 
     assert (await client.post("/api/library/pick", json={})).status_code == 500
 

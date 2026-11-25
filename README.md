@@ -164,7 +164,7 @@ API keys for Claude, OpenAI, and Google Vision are managed through the Settings 
 
 ## Local Library
 
-Switch between **On the TV** and **Local Library** at the top of the page. In Local Library, click **Change…** to choose a folder (a network share works). In a browser on Docent's own Mac this opens the macOS folder dialog; elsewhere it shows a folder list. In the chosen folder, each sub-folder of JPEG or PNG images is a collection. `DOCENT_LIBRARY_DIR` sets the default folder.
+Switch between **On the TV** and **Local Library** at the top of the page. In Local Library, click **Change…** to choose a folder (a network share works). In a browser on the computer running Docent this opens the system's folder dialog (macOS, Windows, or Linux with `zenity` or `kdialog`; only the macOS one has been tried on a real machine). Otherwise, including from another computer or in Docker, it shows a list of folders in your home folder and on mounted drives. In the chosen folder, each sub-folder of JPEG or PNG images is a collection. `DOCENT_LIBRARY_DIR` sets the default folder.
 
 - **Load** adds images to the Frame and removes nothing.
 - **Unload** removes them from the Frame; your files are not changed.
