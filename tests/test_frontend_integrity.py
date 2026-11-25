@@ -146,3 +146,22 @@ def test_library_actions_explain_themselves_on_hover(button):
     script = (INDEX_HTML.parent / "assets" / "js" / "library.js").read_text()
 
     assert re.search(rf"\$\('{button}'\)\.title = ", script)
+
+
+class TestSlideshowBarSurvivesAFailedRead:
+    """One failed status read must not leave the controls empty for a minute."""
+
+    @pytest.fixture
+    def script(self):
+        return (INDEX_HTML.parent / "assets" / "js" / "slideshow.js").read_text()
+
+    def test_interval_menu_is_filled_without_the_tv(self, script, html_source):
+        menu = re.search(r'<select id="slideshowInterval".*?</select>', html_source, re.S).group(0)
+
+        assert re.findall(r'<option value="(\d+)"', menu) == ["3", "15", "60", "720", "1440"]
+
+    def test_failed_read_is_retried_soon(self, script):
+        assert re.search(r"setTimeout\(refreshSlideshow, \d{4}\)", script)
+
+    def test_waits_longer_than_the_server_may_take(self, script):
+        assert re.search(r"api\('/slideshow', \{ timeout: 90000 \}\)", script)

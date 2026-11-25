@@ -772,9 +772,32 @@ async def select_art(body: dict):
     if not content_id:
         raise HTTPException(400, "content_id required")
     _validate_content_id(content_id)
+    stopped = await _show_image(content_id)
+    return {"ok": True, "content_id": content_id, "slideshow_stopped": stopped}
+
+
+async def _show_image(content_id: str) -> bool:
+    """Display one image, stopping any slideshow so that it stays on screen.
+
+    Returns whether a slideshow was stopped.
+    """
+    global _current_id_cache
+
+    def _stop(art) -> bool:
+        if not _slideshow_summary(art.get_slideshow_status())["running"]:
+            return False
+        art.set_slideshow_status(duration=0, type=False, category_id=_MY_PHOTOS)
+        return True
+
+    try:
+        stopped = await _tv_op(_stop, attempts=1)
+    except Exception as e:
+        # Not every Frame supports this; still show the picture.
+        log.warning("Could not check or stop the slideshow: %s", e)
+        stopped = False
     await _tv_op(lambda art: art.select_image(content_id, show=True))
     _current_id_cache = content_id
-    return {"ok": True, "content_id": content_id}
+    return stopped
 
 
 # --- Upload ---
@@ -1004,22 +1027,52 @@ async def set_filter(body: dict):
 
 # --- Slideshow ---
 
+_MY_PHOTOS = "MY-C0002"
+SLIDESHOW_INTERVALS = (3, 15, 60, 720, 1440)  # minutes
+
+
+def _slideshow_summary(status: dict) -> dict:
+    value = str(status.get("value"))
+    running = value.isdigit() and int(value) > 0
+    return {
+        "running": running,
+        "interval": int(value) if running else None,
+        "shuffle": status.get("type") == "shuffleslideshow" if running else None,
+        "intervals": list(SLIDESHOW_INTERVALS),
+    }
+
+
+@app.get("/api/slideshow")
+async def get_slideshow():
+    try:
+        return await _tv_op(lambda art: _slideshow_summary(art.get_slideshow_status()))
+    except Exception as e:
+        log.warning("Could not read the slideshow: %s", e)
+        raise HTTPException(502, "Cannot read the slideshow from the TV")
+
+
 @app.post("/api/slideshow")
 async def set_slideshow(body: dict):
+    """Start the TV's slideshow of My Photos, or stop it with ``duration: 0``."""
     duration = body.get("duration", 0)
-    shuffle = body.get("shuffle", True)
-    category_id = body.get("category_id")
-    try:
-        await _tv_op(
-            lambda art: art.set_slideshow_status(
-                duration=duration,
-                type=shuffle,
-                category_id=category_id,
-            )
+    if type(duration) is not int or duration not in (0, *SLIDESHOW_INTERVALS):
+        raise HTTPException(400, f"duration must be 0 or one of {list(SLIDESHOW_INTERVALS)}")
+    shuffle = bool(body.get("shuffle", True))
+
+    def _apply(art):
+        art.set_slideshow_status(
+            duration=duration, type=shuffle and duration > 0, category_id=_MY_PHOTOS
         )
-        return {"ok": True}
-    except Exception:
+        return _slideshow_summary(art.get_slideshow_status())
+
+    try:
+        summary = await _tv_op(_apply)
+    except Exception as e:
+        log.warning("Could not change the slideshow: %s", e)
         raise HTTPException(502, "Cannot reach TV")
+    if (summary["interval"] or 0) != duration:
+        raise HTTPException(502, "The TV did not accept the slideshow change")
+    return summary
 
 
 # --- Collections ---

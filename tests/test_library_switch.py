@@ -387,3 +387,30 @@ async def test_chooser_is_only_offered_to_a_browser_on_this_computer(lib, choose
 
 async def test_local_browser_is_offered_the_chooser(client, lib, chooser):
     assert (await client.get("/api/library")).json()["native_picker"] is True
+
+
+async def test_display_loads_a_missing_image_then_shows_it(client, lib, frame):
+    other = frame.add(_jpeg(9))
+    frame.slideshow = {"value": "15"}
+
+    await _act(client, "display", paths=["Winter/pic3.jpg"])
+
+    assert (await _job(client))["state"] == "done"
+    assert [c[0] for c in frame.calls] == ["upload", "slideshow", "select"]
+    assert frame.calls[-1][1] != other and other in frame.images
+    assert frame.slideshow["value"] == "off"
+
+
+async def test_display_does_not_upload_an_image_already_there(client, lib, frame):
+    cid = frame.add((lib / "Winter" / "pic3.jpg").read_bytes())
+
+    await _act(client, "display", paths=["Winter/pic3.jpg"])
+
+    assert frame.uploads == 0 and ("select", cid) in frame.calls
+
+
+@pytest.mark.parametrize("body", [{"collection": "Winter"}, {"paths": ["Winter/pic3.jpg", "Winter/pic4.jpg"]}])
+async def test_display_takes_exactly_one_image(client, lib, frame, body):
+    resp = await _act(client, "display", **body)
+
+    assert resp.status_code == 400 and frame.calls == []

@@ -25,7 +25,6 @@ import library
 log = logging.getLogger("docent")
 
 _MY_PHOTOS = "MY-C0002"
-_SLIDESHOW_INTERVALS = (3, 15, 60, 720, 1440)  # minutes
 _THUMB_SIZE = (480, 270)
 # The folder picker and the saved library folder are limited to these places.
 BROWSE_ROOTS = [Path.home(), Path("/Volumes")]
@@ -203,7 +202,7 @@ async def _plan(paths: list[str]) -> tuple[dict, dict, dict, dict]:
 async def _run(kind: str, paths: list[str], *, interval: int = 15, shuffle: bool = True,
                matte: str = "none", delete_unknown: frozenset = frozenset(),
                collection: str | None = None) -> None:
-    """Carry out a ``load``, ``unload`` or ``show`` (replace) job.
+    """Carry out a ``load``, ``display``, ``unload`` or ``show`` (replace) job.
 
     Uploads everything before deleting anything, so a failure leaves the old
     pictures in place, and running it again carries on where it stopped.
@@ -228,6 +227,10 @@ async def _run(kind: str, paths: list[str], *, interval: int = 15, shuffle: bool
 
         if kind == "load":
             message = f"{len(plan['upload'])} image(s) loaded onto the Frame."
+        elif kind == "display":
+            job.update(step="Showing the image", done=0, total=0)
+            stopped = await srv._show_image(shown[target[0]])
+            message = "Now showing on the Frame." + (" The slideshow was stopped." if stopped else "")
         elif kind == "unload":
             remove = [cid for cid, key in links.items() if key in set(target)]
             job.update(step="Removing images", done=0, total=0)
@@ -337,7 +340,7 @@ def _summary() -> dict:
         "configured": root is not None,
         "available": False,
         "root": str(root or ""),
-        "intervals": list(_SLIDESHOW_INTERVALS),
+        "intervals": list(srv.SLIDESHOW_INTERVALS),
         "collections": [],
         "total": 0,
     }
@@ -555,6 +558,13 @@ def build_router(server_module) -> APIRouter:
     async def load(body: dict):
         return _start_job("load", body, matte=_matte(body))
 
+    @router.post("/display")
+    async def display(body: dict):
+        paths = body.get("paths")
+        if not isinstance(paths, list) or len(paths) != 1:
+            raise HTTPException(400, "Choose exactly one image to show")
+        return _start_job("display", body, matte=_matte(body))
+
     @router.post("/unload")
     async def unload(body: dict):
         return _start_job("unload", body)
@@ -562,8 +572,8 @@ def build_router(server_module) -> APIRouter:
     @router.post("/show")
     async def show(body: dict):
         interval = body.get("interval", 15)
-        if interval not in _SLIDESHOW_INTERVALS:
-            raise HTTPException(400, f"interval must be one of {list(_SLIDESHOW_INTERVALS)}")
+        if interval not in srv.SLIDESHOW_INTERVALS:
+            raise HTTPException(400, f"interval must be one of {list(srv.SLIDESHOW_INTERVALS)}")
         delete_unknown = body.get("delete_unknown") or []
         srv._validate_content_ids(delete_unknown)
         return _start_job(

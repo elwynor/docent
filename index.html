@@ -1635,6 +1635,7 @@
   /* View switch and Local Library */
   .view-switch { display: flex; gap: 8px; padding: var(--space-sm) var(--space-lg) 0; }
   .view-switch button[aria-pressed="true"] { background: var(--color-soot); color: var(--color-gallery-white); }
+  .slideshow-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: var(--space-sm) var(--space-lg); font-size: 13px; }
   .library-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: var(--space-sm) 0; }
   #libraryView { padding: 0 var(--space-lg) var(--space-lg); }
   .library-path { font-size: 13px; word-break: break-all; }
@@ -2112,6 +2113,20 @@
     <button type="button" id="viewLibrary" title="Work with the pictures in your library folder" aria-pressed="false" onclick="setView('library')">Local Library</button>
   </nav>
 
+  <div class="slideshow-bar" aria-label="Slideshow">
+    <span id="slideshowState" role="status">Slideshow: checking…</span>
+    <select id="slideshowInterval" aria-label="How often the picture changes" title="How often the picture changes">
+      <option value="3">Every 3 minutes</option>
+      <option value="15" selected>Every 15 minutes</option>
+      <option value="60">Every 1 hour</option>
+      <option value="720">Every 12 hours</option>
+      <option value="1440">Every 1 day</option>
+    </select>
+    <label title="Show pictures in random order"><input type="checkbox" id="slideshowShuffle" checked> Shuffle</label>
+    <button id="slideshowStart" onclick="startSlideshow()" title="The TV rotates through all of My Photos until you stop it" disabled>Start slideshow</button>
+    <button id="slideshowStop" onclick="setSlideshow(0)" title="Keep the current picture on screen" disabled>Stop</button>
+  </div>
+
   <main>
   <div id="tvView">
   <div class="upload-step-bar" id="uploadStepBar">
@@ -2203,6 +2218,7 @@
           <button onclick="selectAllLibrary()" title="Select every image listed here">Select all</button>
           <button id="libraryClear" title="Deselect all images" onclick="clearLibrarySelection()" hidden>Clear selection</button>
           <span class="library-spacer"></span>
+          <button id="libraryDisplay" onclick="displaySelected()" disabled>Show image</button>
           <button id="libraryLoad" onclick="openActionDialog('load')" disabled>Load</button>
           <button id="libraryUnload" onclick="openActionDialog('unload')" disabled>Unload</button>
           <button class="primary" id="libraryReplace" onclick="openActionDialog('show')" disabled>Replace TV contents</button>
@@ -2238,7 +2254,7 @@
       <div class="matte-color-row" id="matteColorRow"></div>
     </div>
     <div class="detail-actions">
-      <button class="primary" onclick="displayCurrent()" title="Show this artwork on your Frame TV">Display on Frame</button>
+      <button class="primary" onclick="displayCurrent()" title="Show this artwork on your Frame TV and stop any slideshow">Display on Frame</button>
       <button class="danger" onclick="deleteCurrent()" title="Delete this artwork from Frame">Delete</button>
     </div>
   </div>
@@ -3679,11 +3695,12 @@
       if (!detailItem) return;
       try {
         showLoading('Setting display...');
-        await api('/select', { method: 'POST', body: { content_id: detailItem.content_id } });
+        const shown = await api('/select', { method: 'POST', body: { content_id: detailItem.content_id } });
         currentId = detailItem.content_id;
         renderGrid();
         _updateCurrentCardObserver();
-        toast('Now displaying', 'success');
+        toast(shown.slideshow_stopped ? 'Now displaying — slideshow stopped' : 'Now displaying', 'success');
+        refreshSlideshow();
       } catch (e) {
         toast('Failed: ' + e.message, 'error');
       } finally {
@@ -5252,6 +5269,7 @@
       if (!rec) return;
       try {
         await api('/select', { method: 'POST', body: { content_id: rec.content_id } });
+        refreshSlideshow();
         currentId = rec.content_id;
         renderGrid();
         _updateCurrentCardObserver();
@@ -5407,5 +5425,6 @@
   </script>
   <button class="jump-to-current" id="jumpToCurrentFab" title="Scroll to the artwork currently on your TV" onclick="scrollToCurrentCard()"><span class="fab-icon">▶</span><span class="fab-label">Now showing</span></button>
   <script src="/assets/js/library.js"></script>
+  <script src="/assets/js/slideshow.js"></script>
 </body>
 </html>

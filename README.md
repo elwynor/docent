@@ -170,6 +170,10 @@ Switch between **On the TV** and **Local Library** at the top of the page. In Lo
 - **Unload** removes them from the Frame; your files are not changed.
 - **Replace TV contents** makes My Photos match your selection and starts the TV's own slideshow. TV images with no library copy are only removed if you tick the box.
 
+- **Show image** displays one selected image (copying it to the TV first if needed) and stops any slideshow.
+
+The slideshow bar, in both views, starts and stops the TV's slideshow of all My Photos and sets how often it changes. **Display on Frame** also stops a running slideshow, so the picture stays on screen.
+
 Docent only needs to run while one of these is in progress. Images that aren't 16:9 are cropped using the crop you chose when uploading a file of the same name, otherwise from the centre. A browser collection with the same name as a folder is updated to match it.
 
 ## Project Structure

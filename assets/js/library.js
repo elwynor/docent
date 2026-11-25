@@ -155,6 +155,10 @@ function renderLibraryActions() {
   $('libraryUnload').textContent = `Unload ${what}`;
   const off = lib.running || !lib.images.length;
   ['libraryLoad', 'libraryUnload', 'libraryReplace'].forEach(id => { $(id).disabled = off; });
+  $('libraryDisplay').disabled = off || count !== 1;
+  $('libraryDisplay').title = count === 1
+    ? 'Show this image on the TV and stop any slideshow. It is copied to the TV first if needed.'
+    : 'Select exactly one image to show it.';
   // Hover text says exactly which images each action will affect.
   const images = count ? `the ${count} selected image(s)`
     : (lib.collection ? `every image in “${lib.collection}”` : 'every image listed here');
@@ -177,6 +181,13 @@ function selectAllLibrary() {
 
 // --- Actions ---
 
+/* Show the one selected image; ask for a matte only if it has to be uploaded. */
+function displaySelected() {
+  const [path] = lib.selected;
+  if (lib.onTv[path]) startLibraryJob('display', { paths: [path] });
+  else openActionDialog('display');
+}
+
 /* The images an action applies to: the selection, else the open collection. */
 function libraryTarget() {
   if (lib.selected.size) return { paths: [...lib.selected] };
@@ -190,7 +201,7 @@ function describeTarget() {
 }
 
 function openActionDialog(action) {
-  const titles = { load: 'Load onto the Frame', unload: 'Unload from the Frame', show: 'Replace TV Contents' };
+  const titles = { display: 'Show on the Frame', load: 'Load onto the Frame', unload: 'Unload from the Frame', show: 'Replace TV Contents' };
   const target = libraryTarget();
   const body = $('libraryDialogBody');
   const confirm = $('libraryDialogConfirm');
@@ -222,7 +233,9 @@ function openActionDialog(action) {
     body.append(form);
   }
 
-  if (action === 'load') {
+  if (action === 'display') {
+    body.append(el('p', { textContent: 'The image is copied to the TV if needed, then shown. Any slideshow stops. Nothing is removed.' }));
+  } else if (action === 'load') {
     body.append(el('p', { textContent: 'Images already on the TV are skipped. Nothing is removed.' }));
   } else if (action === 'unload') {
     body.append(el('p', { textContent: 'These images are removed from the TV. The files in your library are not changed.' }));
@@ -310,6 +323,7 @@ function pollLibraryJob() {
     await loadCollections();
     await refreshArt();
     toast(job.message, job.state === 'done' ? 'success' : 'error', 6000);
+    refreshSlideshow();
     renderLibraryGrid();
     refreshOnTv();
   }, 1500);
