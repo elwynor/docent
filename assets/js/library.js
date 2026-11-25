@@ -9,6 +9,9 @@ const lib = {
   collection: null,   // null = all images, '' = main folder, otherwise a folder name
   images: [],
   onTv: {},
+  outdated: {},       // paths whose TV copy predates a crop
+  version: 0,         // changes when files may have changed, to refresh pictures
+  afterJob: null,     // runs after the next job succeeds
   selected: new Set(),
   running: false,
   loadToken: 0,
@@ -55,6 +58,7 @@ async function loadLibrary() {
     return;
   }
   const { configured, available, root, collections } = lib.info;
+  lib.version += 1;
   $('libraryFolder').textContent = configured ? root : 'No folder chosen';
   if (lib.collection && !collections.some(c => c.name === lib.collection)) lib.collection = null;
   renderLibraryCollections();
@@ -96,10 +100,12 @@ async function refreshOnTv() {
   try {
     const data = await api('/library/tv', { timeout: 300000 });
     lib.onTv = data.on_tv;
+    lib.outdated = data.outdated;
     $('libraryTvState').textContent = '';
   } catch (e) {
     console.debug('on-TV check failed:', e);
     lib.onTv = {};
+    lib.outdated = {};
     $('libraryTvState').textContent = 'Could not check the TV, so “On TV” badges are hidden.';
   }
   renderLibraryGrid();
@@ -132,9 +138,12 @@ function libraryTitle() {
 function renderLibraryGrid() {
   $('libraryGrid').replaceChildren(...lib.images.map(image => {
     const card = el('button', { type: 'button', className: 'library-card', title: image.path },
-      el('img', { loading: 'lazy', alt: '', src: '/api/library/thumb?path=' + encodeURIComponent(image.path) }),
+      el('img', { loading: 'lazy', alt: '', src: `/api/library/thumb?path=${encodeURIComponent(image.path)}&v=${lib.version}` }),
       el('span', { className: 'library-card-name', textContent: image.name }));
     if (lib.onTv[image.path]) card.append(el('span', { className: 'library-badge', textContent: 'On TV' }));
+    else if (lib.outdated[image.path]) {
+      card.append(el('span', { className: 'library-badge outdated', textContent: 'TV copy out of date' }));
+    }
     card.setAttribute('aria-pressed', String(lib.selected.has(image.path)));
     card.onclick = () => {
       if (lib.selected.has(image.path)) lib.selected.delete(image.path);
@@ -167,6 +176,8 @@ function renderLibraryActions() {
   $('libraryReplace').title = `Make the TV hold only ${images}, removing other pictures, then start a slideshow. You can review the changes first.`;
   $('libraryClear').hidden = !count;
   $('libraryChooseFolder').disabled = lib.running;
+  // Defined in library_manage.js, which loads after this file.
+  if (typeof renderLibraryManage === 'function') renderLibraryManage();
 }
 
 function clearLibrarySelection() {
@@ -201,10 +212,12 @@ function describeTarget() {
 }
 
 function openActionDialog(action) {
-  const titles = { display: 'Show on the Frame', load: 'Load onto the Frame', unload: 'Unload from the Frame', show: 'Replace TV Contents' };
+  const titles = { update: 'Update the TV Copy', display: 'Show on the Frame', load: 'Load onto the Frame', unload: 'Unload from the Frame', show: 'Replace TV Contents' };
   const target = libraryTarget();
   const body = $('libraryDialogBody');
   const confirm = $('libraryDialogConfirm');
+  confirm.hidden = false;
+  confirm.className = 'primary';
   $('libraryDialogTitle').textContent = titles[action];
   confirm.textContent = titles[action];
   confirm.disabled = false;
@@ -233,7 +246,9 @@ function openActionDialog(action) {
     body.append(form);
   }
 
-  if (action === 'display') {
+  if (action === 'update') {
+    body.append(el('p', { textContent: 'The cropped picture is copied to the TV and the old version is removed.' }));
+  } else if (action === 'display') {
     body.append(el('p', { textContent: 'The image is copied to the TV if needed, then shown. Any slideshow stops. Nothing is removed.' }));
   } else if (action === 'load') {
     body.append(el('p', { textContent: 'Images already on the TV are skipped. Nothing is removed.' }));
@@ -290,6 +305,7 @@ async function startLibraryJob(action, request) {
     await api('/library/' + action, { method: 'POST', body: request, timeout: 120000 });
   } catch (e) {
     lib.running = false;
+    lib.afterJob = null;
     renderLibraryActions();
     setLibraryStatus('Could not start: ' + e.message);
     return;
@@ -318,6 +334,9 @@ function pollLibraryJob() {
     lib.running = false;
     lib.selected.clear();
     setLibraryStatus(job.message || '');
+    const after = lib.afterJob;
+    lib.afterJob = null;
+    if (after && job.state === 'done') await after();
     // The TV can reuse IDs, so forget thumbnails cached in the browser.
     Object.keys(thumbCache).forEach(id => delete thumbCache[id]);
     await loadCollections();
@@ -395,6 +414,7 @@ async function showNewFolder() {
   lib.collection = null;
   lib.selected.clear();
   lib.onTv = {};
+  lib.outdated = {};
   await loadLibrary();
 }
 

@@ -14,7 +14,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-COPY server.py library.py library_routes.py index.html ./
+COPY server.py library.py library_files.py library_routes.py index.html ./
 COPY assets/ assets/
 
 ENV DOCENT_DATA_DIR=/data

@@ -174,6 +174,8 @@ Switch between **On the TV** and **Local Library** at the top of the page. In Lo
 
 The slideshow bar, in both views, starts and stops the TV's slideshow of all My Photos and sets how often it changes. **Display on Frame** also stops a running slideshow, so the picture stays on screen.
 
+Local Library also manages the files: add images (or drag them in), crop to 16:9, rename, move, copy and delete, and create, rename or delete collections. Nothing is overwritten: a taken name gets a number. With **Keep backups** on (the default), the original is copied to `.backups/` in the library folder before a crop or delete, and **Restore** brings it back. After a crop, **Update TV copy** replaces the old version on the Frame.
+
 Docent only needs to run while one of these is in progress. Images that aren't 16:9 are cropped using the crop you chose when uploading a file of the same name, otherwise from the centre. A browser collection with the same name as a folder is updated to match it.
 
 ## Project Structure

@@ -15,17 +15,20 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from PIL import Image, ImageOps
 from samsungtvws.exceptions import ConnectionFailure
 
 import library
+import library_files
 
 log = logging.getLogger("docent")
 
 _MY_PHOTOS = "MY-C0002"
 _THUMB_SIZE = (480, 270)
+_PREVIEW_SIZE = (1600, 1600)
+MAX_FILE_BYTES = 100 * 1024 * 1024  # per image added to the library
 # The folder picker and the saved library folder are limited to these places.
 BROWSE_ROOTS = [Path.home(), Path("/Volumes")]
 
@@ -43,12 +46,16 @@ end run"""
 srv = None  # the server module, set by build_router()
 job: dict = {"state": "idle"}
 task: asyncio.Task | None = None
+# Held while library state is read and rewritten, by TV checks and file changes.
+state_lock = asyncio.Lock()
 
 
 def _load_state() -> dict:
     state = srv._safe_load_json(srv.LIBRARY_STATE_FILE, dict)
-    for key in ("files", "uploads", "crops", "matte", "meta"):
+    for key in ("files", "uploads", "outdated", "crops", "matte", "meta"):
         state.setdefault(key, {})
+    state.setdefault("cropped", [])  # files whose saved upload crop no longer applies
+    state.setdefault("backups", True)
     return state
 
 
@@ -124,7 +131,7 @@ def _index_library(state: dict) -> tuple[dict, dict]:
             rel = _rel(name, path)
             try:
                 stat = path.stat()
-                crop = state["crops"].get(path.stem.lower())
+                crop = None if rel in state["cropped"] else state["crops"].get(path.stem.lower())
                 stamp = [stat.st_size, stat.st_mtime_ns, crop]
                 entry = state["files"].get(rel)
                 if not entry or entry["stamp"] != stamp:
@@ -159,56 +166,73 @@ def _thumbnails_for(art, content_ids: list[str]) -> dict[str, bytes]:
     return {name.rsplit(".", 1)[0]: bytes(data) for name, data in result.items()}
 
 
-async def _link_tv() -> tuple[dict, dict, dict, dict]:
+async def _link_tv() -> tuple[dict, dict, dict, dict, dict]:
     """Match the TV's images to library files.  Changes nothing on the TV.
 
-    Returns ``(keys by path, file info by key, TV images, links by content ID)``.
+    Returns ``(keys by path, file info by key, TV images, links by content ID,
+    outdated copies by content ID)``.  An outdated copy shows a file as it was
+    before it was cropped.
     """
-    state = _load_state()
-    keys, files = await asyncio.to_thread(_index_library, state)
-    on_tv = await srv._tv_op(_my_photos)
+    async with state_lock:
+        state = _load_state()
+        keys, files = await asyncio.to_thread(_index_library, state)
+        on_tv = await srv._tv_op(_my_photos)
 
-    links, unrecorded = {}, []
-    for cid, item in on_tv.items():
-        record = state["uploads"].get(cid)
-        # The date guards against the TV reusing an ID for another picture.
-        if record and record["image_date"] == item.get("image_date") and record["key"] in files:
-            links[cid] = record["key"]
-        else:
-            unrecorded.append(cid)
+        links, outdated, unrecorded = {}, {}, []
+        for cid, item in on_tv.items():
+            # The date guards against the TV reusing an ID for another picture.
+            date = item.get("image_date")
+            old = state["outdated"].get(cid)
+            if old and old["image_date"] == date:
+                if old["was"] in files:  # the original is back in the library
+                    links[cid] = old["was"]
+                    continue
+                if old["key"] in files:
+                    outdated[cid] = old
+                    continue
+            record = state["uploads"].get(cid)
+            if record and record["image_date"] == date and record["key"] in files:
+                links[cid] = record["key"]
+            else:
+                unrecorded.append(cid)
 
-    if unrecorded:
-        thumbs = await srv._tv_op(lambda art: _thumbnails_for(art, unrecorded), timeout=90)
-        matched = await asyncio.to_thread(
-            library.match,
-            {cid: library.signature(data) for cid, data in thumbs.items() if cid in on_tv},
-            {key: info["sig"] for key, info in files.items()},
-        )
-        links.update(matched)
+        if unrecorded:
+            thumbs = await srv._tv_op(lambda art: _thumbnails_for(art, unrecorded), timeout=90)
+            matched = await asyncio.to_thread(
+                library.match,
+                {c: library.signature(data) for c, data in thumbs.items() if c in on_tv},
+                {key: info["sig"] for key, info in files.items()},
+            )
+            links.update(matched)
 
-    state["uploads"] = {
-        cid: {"key": key, "image_date": on_tv[cid].get("image_date")} for cid, key in links.items()
-    }
-    _save_state(state)
-    return keys, files, on_tv, links
+        state["uploads"] = {
+            c: {"key": key, "image_date": on_tv[c].get("image_date")} for c, key in links.items()
+        }
+        state["outdated"] = outdated
+        _save_state(state)
+    return keys, files, on_tv, links, outdated
 
 
-async def _plan(paths: list[str]) -> tuple[dict, dict, dict, dict]:
-    keys, files, on_tv, links = await _link_tv()
+async def _plan(paths: list[str]) -> tuple[dict, dict, dict, dict, dict]:
+    keys, files, on_tv, links, outdated = await _link_tv()
     plan = library.make_plan([keys[rel] for rel in paths], links, list(on_tv))
-    return plan, files, links, keys
+    # An old version whose original was backed up is as safe to remove as any other.
+    safe = [c for c in plan["unknown"] if c in outdated and outdated[c]["backed"]]
+    plan["delete"] += safe
+    plan["unknown"] = [c for c in plan["unknown"] if c not in safe]
+    return plan, files, links, keys, outdated
 
 
 async def _run(kind: str, paths: list[str], *, interval: int = 15, shuffle: bool = True,
                matte: str = "none", delete_unknown: frozenset = frozenset(),
                collection: str | None = None) -> None:
-    """Carry out a ``load``, ``display``, ``unload`` or ``show`` (replace) job.
+    """Carry out a ``load``, ``display``, ``update``, ``unload`` or ``show`` job.
 
     Uploads everything before deleting anything, so a failure leaves the old
     pictures in place, and running it again carries on where it stopped.
     """
     try:
-        plan, files, links, keys = await _plan(paths)
+        plan, files, links, keys, outdated = await _plan(paths)
         target = list(dict.fromkeys(keys[rel] for rel in paths))
         shown = {key: cid for cid, key in plan["keep"].items()}
 
@@ -231,8 +255,19 @@ async def _run(kind: str, paths: list[str], *, interval: int = 15, shuffle: bool
             job.update(step="Showing the image", done=0, total=0)
             stopped = await srv._show_image(shown[target[0]])
             message = "Now showing on the Frame." + (" The slideshow was stopped." if stopped else "")
+        elif kind == "update":
+            old = [c for c, record in outdated.items() if record["key"] in target]
+            job.update(step="Removing the old version", done=0, total=0)
+            if old:
+                current = await srv._tv_op(lambda art: art.get_current())
+                if isinstance(current, dict) and current.get("content_id") in old:
+                    new = shown[outdated[current["content_id"]]["key"]]
+                    await srv._tv_op(lambda art: art.select_image(new))
+                await _remove_from_tv(old)
+            message = f"{len(old)} out-of-date image(s) replaced on the Frame."
         elif kind == "unload":
             remove = [cid for cid, key in links.items() if key in set(target)]
+            remove += [c for c, record in outdated.items() if record["key"] in set(target)]
             job.update(step="Removing images", done=0, total=0)
             if remove:
                 await _remove_from_tv(remove)
@@ -317,6 +352,7 @@ async def _remove_from_tv(content_ids: list[str]) -> None:
         for cid in content_ids:
             meta["artwork"].pop(cid, None)
             state["uploads"].pop(cid, None)
+            state["outdated"].pop(cid, None)
             (srv.THUMB_DIR / f"{cid}.jpg").unlink(missing_ok=True)
         srv._save_artwork_meta(meta)
     _save_state(state)
@@ -343,6 +379,7 @@ def _summary() -> dict:
         "intervals": list(srv.SLIDESHOW_INTERVALS),
         "collections": [],
         "total": 0,
+        "backups": _load_state()["backups"],
     }
     if _available(root):
         mattes = _load_state()["matte"]
@@ -401,16 +438,17 @@ def _save_root(folder: Path) -> None:
     _save_state(state)
 
 
-def _thumbnail(path: Path) -> bytes:
+def _thumbnail(path: Path, size: tuple[int, int] = _THUMB_SIZE) -> bytes:
     stat = path.stat()
-    name = hashlib.sha256(f"{path}|{stat.st_size}|{stat.st_mtime_ns}".encode()).hexdigest()
+    stamp = f"{path}|{stat.st_size}|{stat.st_mtime_ns}|{size}"
+    name = hashlib.sha256(stamp.encode()).hexdigest()
     cached = srv.CACHE_DIR / "library" / f"{name}.jpg"
     if cached.exists():
         return cached.read_bytes()
     img = Image.open(path)
-    img.draft("RGB", _THUMB_SIZE)
+    img.draft("RGB", size)
     img = ImageOps.exif_transpose(img).convert("RGB")
-    img.thumbnail(_THUMB_SIZE, Image.LANCZOS)
+    img.thumbnail(size, Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=80)
     cached.parent.mkdir(parents=True, exist_ok=True)
@@ -432,6 +470,94 @@ def _start_job(kind: str, body: dict, **options) -> dict:
            "done": 0, "total": 0, "message": ""}
     task = asyncio.create_task(_run(kind, paths, collection=collection, **options))
     return job
+
+
+def _require_root() -> Path:
+    _scan()  # raises a helpful error if there is no reachable folder
+    return _root()
+
+
+async def _change_files(change):
+    """Run ``change(root, state)`` while no TV job or check is using the library."""
+    _check_idle()
+    async with state_lock:
+        _check_idle()
+        root = _require_root()
+        state = _load_state()
+        try:
+            return await asyncio.to_thread(change, root, state)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except OSError as e:
+            log.warning("Library file change failed: %s", e)
+            raise HTTPException(500, f"Could not change the files: {e.strerror or e}")
+        finally:
+            _save_state(state)
+
+
+def _paths(root: Path, body: dict) -> list[str]:
+    """Every path in the request, all checked before any is acted on."""
+    paths = body.get("paths")
+    if not isinstance(paths, list) or not paths:
+        raise ValueError("Choose at least one image")
+    for rel in paths:
+        library.resolve(root, rel)
+    return list(dict.fromkeys(paths))
+
+
+def _carry_crop(state: dict, old: str, new: str, *, moved: bool) -> None:
+    """Keep crop settings with a file that was renamed, moved or copied."""
+    if old in state["cropped"]:
+        state["cropped"].append(new)
+        if moved:
+            state["cropped"].remove(old)
+        return
+    crop = state["crops"].get(Path(old).stem.lower())
+    if crop:
+        state["crops"].setdefault(Path(new).stem.lower(), crop)
+
+
+def _file_key(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _crop(root: Path, state: dict, rel: str, box: dict) -> None:
+    path = library.resolve(root, rel)
+    before = _file_key(path)
+    library_files.crop_image(root, rel, backup=state["backups"], **box)
+    after = _file_key(path)
+    if rel not in state["cropped"]:
+        state["cropped"].append(rel)
+    # Another file with the old content still accounts for the copy on the TV.
+    if any(other != rel and entry["key"] == before and (root / other).is_file()
+           for other, entry in state["files"].items()):
+        return
+    for cid, record in list(state["uploads"].items()):
+        if record["key"] == before:
+            del state["uploads"][cid]
+            state["outdated"][cid] = {
+                "image_date": record["image_date"], "was": before, "key": after,
+                "backed": state["backups"],
+            }
+    for record in state["outdated"].values():
+        if record["key"] == before:  # cropped again before the TV was updated
+            record["key"] = after
+
+
+async def _rename_docent_collection(old: str, new: str) -> None:
+    async with srv._collections_lock:
+        data = srv._load_collections()
+        for c in data["collections"]:
+            if c["name"] == old:
+                c["name"] = new
+        srv._save_collections(data)
+
+
+def _text(body: dict, field: str) -> str:
+    value = body.get(field)
+    if not isinstance(value, str):
+        raise HTTPException(400, f"{field} is required")
+    return value
 
 
 def _matte(body: dict) -> str:
@@ -523,21 +649,25 @@ def build_router(server_module) -> APIRouter:
     async def on_tv():
         _check_idle()
         try:
-            keys, _, _, links = await _link_tv()
+            keys, _, _, links, outdated = await _link_tv()
         except HTTPException:
             raise
         except Exception as e:
             log.warning("Library TV check failed: %s", e)
             raise HTTPException(502, "Cannot reach TV — is it on and connected?")
         by_key = {key: cid for cid, key in links.items()}
-        return {"on_tv": {rel: by_key[key] for rel, key in keys.items() if key in by_key}}
+        old = {record["key"]: cid for cid, record in outdated.items()}
+        return {
+            "on_tv": {rel: by_key[key] for rel, key in keys.items() if key in by_key},
+            "outdated": {rel: old[key] for rel, key in keys.items() if key in old},
+        }
 
     @router.post("/plan")
     async def plan_changes(body: dict):
         _check_idle()
         paths = _target(body)
         try:
-            plan, files, links, _ = await _plan(paths)
+            plan, files, links, _, outdated = await _plan(paths)
         except ValueError as e:
             raise HTTPException(400, str(e))
         except Exception as e:
@@ -546,7 +676,10 @@ def build_router(server_module) -> APIRouter:
         return {
             "keep": len(plan["keep"]),
             "upload": [files[key]["path"].name for key in plan["upload"]],
-            "delete": [{"content_id": c, "file": files[links[c]]["rel"]} for c in plan["delete"]],
+            "delete": [
+                {"content_id": c, "file": files[links.get(c) or outdated[c]["key"]]["rel"]}
+                for c in plan["delete"]
+            ],
             "unknown": plan["unknown"],
         }
 
@@ -565,6 +698,10 @@ def build_router(server_module) -> APIRouter:
             raise HTTPException(400, "Choose exactly one image to show")
         return _start_job("display", body, matte=_matte(body))
 
+    @router.post("/update")
+    async def update(body: dict):
+        return _start_job("update", body, matte=_matte(body))
+
     @router.post("/unload")
     async def unload(body: dict):
         return _start_job("unload", body)
@@ -580,5 +717,156 @@ def build_router(server_module) -> APIRouter:
             "show", body, interval=interval, shuffle=bool(body.get("shuffle", True)),
             matte=_matte(body), delete_unknown=frozenset(delete_unknown),
         )
+
+    # --- file management ---
+
+    @router.put("/options")
+    async def options(body: dict):
+        if not isinstance(body.get("backups"), bool):
+            raise HTTPException(400, "backups must be true or false")
+        await _change_files(lambda root, state: state.update(backups=body["backups"]))
+        return {"backups": body["backups"]}
+
+    @router.post("/files")
+    async def add_files(
+        request: Request, collection: str = Form(""), files: list[UploadFile] = File(...)
+    ):
+        # A form post needs no permission check by the browser, so check here.
+        origin = request.headers.get("origin")
+        if origin and origin.split("://", 1)[-1] != request.headers.get("host"):
+            raise HTTPException(403, "Images can only be added from Docent's own page")
+        added, errors = [], []
+        for upload in files:
+            name = Path(upload.filename or "").name
+            data = await upload.read(MAX_FILE_BYTES + 1)
+            if len(data) > MAX_FILE_BYTES:
+                errors.append({"name": name, "error": "The file is larger than 100 MB"})
+                continue
+            try:
+                added.append(await _change_files(
+                    lambda root, state: library_files.add_image(root, collection, name, data)))
+            except HTTPException as e:
+                if e.status_code == 409:
+                    raise
+                errors.append({"name": name, "error": e.detail})
+        return {"added": added, "errors": errors}
+
+    @router.post("/files/rename")
+    async def rename_file(body: dict):
+        old, name = _text(body, "path"), _text(body, "name")
+
+        def change(root, state):
+            new = library_files.rename_image(root, old, name)
+            _carry_crop(state, old, new, moved=True)
+            return {"path": new}
+
+        return await _change_files(change)
+
+    async def transfer(body: dict, operation, *, moved: bool):
+        collection = _text(body, "collection")
+
+        def change(root, state):
+            results = []
+            library_files.collection_dir(root, collection)
+            for rel in _paths(root, body):
+                new = operation(root, rel, collection)
+                if new != rel:
+                    _carry_crop(state, rel, new, moved=moved)
+                results.append(new)
+            return {"paths": results}
+
+        return await _change_files(change)
+
+    @router.post("/files/move")
+    async def move_files(body: dict):
+        return await transfer(body, library_files.move_image, moved=True)
+
+    @router.post("/files/copy")
+    async def copy_files(body: dict):
+        return await transfer(body, library_files.copy_image, moved=False)
+
+    @router.post("/files/delete")
+    async def delete_files(body: dict):
+        def change(root, state):
+            paths = _paths(root, body)
+            for rel in paths:
+                library_files.delete_image(root, rel, backup=state["backups"])
+                if rel in state["cropped"]:
+                    state["cropped"].remove(rel)
+            return {"deleted": len(paths)}
+
+        return await _change_files(change)
+
+    @router.get("/preview")
+    async def preview(path: str):
+        try:
+            root = _require_root()
+            data = await asyncio.to_thread(
+                _thumbnail, library.resolve(root, path), _PREVIEW_SIZE)
+        except (ValueError, OSError):
+            raise HTTPException(404, "No such library image")
+        return Response(content=data, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-cache"})
+
+    @router.post("/crop")
+    async def crop(body: dict):
+        rel = _text(body, "path")
+        box = {k: body.get(k) for k in ("left", "top", "width")}
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in box.values()):
+            raise HTTPException(400, "left, top and width are required numbers")
+        await _change_files(lambda root, state: _crop(root, state, rel, box))
+        return {"path": rel}
+
+    @router.post("/collections")
+    async def create_collection(body: dict):
+        name = _text(body, "name")
+        return {"name": await _change_files(
+            lambda root, state: library_files.create_collection(root, name))}
+
+    @router.put("/collections")
+    async def rename_collection(body: dict):
+        old, wanted = _text(body, "name"), _text(body, "new_name")
+
+        def change(root, state):
+            new = library_files.rename_collection(root, old, wanted)
+            prefix = f"{old}/"
+            state["cropped"] = [
+                f"{new}/{rel[len(prefix):]}" if rel.startswith(prefix) else rel
+                for rel in state["cropped"]
+            ]
+            if old in state["matte"]:
+                state["matte"][new] = state["matte"].pop(old)
+            return new
+
+        new = await _change_files(change)
+        await _rename_docent_collection(old, new)
+        return {"name": new}
+
+    @router.post("/collections/delete")
+    async def delete_collection(body: dict):
+        name = _text(body, "name")
+        return await _change_files(lambda root, state: library_files.delete_collection(
+            root, name, backup=state["backups"]))
+
+    @router.get("/backups")
+    async def backups():
+        root = _require_root()
+        return {"backups": await asyncio.to_thread(library_files.list_backups, root)}
+
+    @router.get("/backups/thumb")
+    async def backup_thumb(id: str):
+        try:
+            root = _require_root()
+            data = await asyncio.to_thread(
+                lambda: _thumbnail(library_files.backup_path(root, id)))
+        except (ValueError, OSError):
+            raise HTTPException(404, "No such backup")
+        return Response(content=data, media_type="image/jpeg")
+
+    @router.post("/backups/restore")
+    async def restore(body: dict):
+        backup_id = _text(body, "id")
+        return {"path": await _change_files(
+            lambda root, state: library_files.restore_backup(root, backup_id))}
 
     return router

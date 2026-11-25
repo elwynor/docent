@@ -1643,7 +1643,18 @@
   .library-status { font-size: 13px; color: var(--text2); }
   .library-status:not(:empty) { padding: 6px 0; }
   .library-layout { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 16px; }
-  .library-layout > .library-list { flex: 0 0 220px; }
+  .library-side { flex: 0 0 220px; display: flex; flex-direction: column; gap: 12px; font-size: 13px; }
+  #libraryView.dragover { outline: 3px dashed var(--color-soot); outline-offset: -8px; }
+  .library-badge.outdated { background: var(--color-gallery-white); color: var(--danger); border: 1px solid var(--danger); }
+  #libraryDialogBody input[type="text"], #libraryDialogBody input[type="range"] { width: 100%; }
+  .crop-stage { position: relative; overflow: hidden; line-height: 0; margin: 0 auto 12px; width: fit-content; max-width: 100%; }
+  .crop-stage img { max-width: 100%; max-height: 48vh; user-select: none; }
+  .crop-frame { position: absolute; border: 2px solid #fff; box-shadow: 0 0 0 9999px rgba(0,0,0,0.55);
+    cursor: move; touch-action: none; box-sizing: border-box; }
+  .restore-list { max-height: 50vh; overflow-y: auto; }
+  .restore-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; }
+  .restore-row img { width: 96px; height: 54px; object-fit: cover; }
+  .restore-row span { flex: 1; word-break: break-word; }
   .library-main { flex: 1 1 320px; min-width: 0; }
   .library-list { display: flex; flex-direction: column; gap: 6px; padding-top: var(--space-sm); }
   button.library-collection { display: flex; justify-content: space-between; gap: 8px; text-align: left; text-transform: none; }
@@ -2211,7 +2222,16 @@
     </div>
     <div class="library-status" id="libraryStatus" role="status"></div>
     <div class="library-layout">
-      <div class="library-list" id="libraryCollections" aria-label="Collections"></div>
+      <div class="library-side">
+        <div class="library-list" id="libraryCollections" aria-label="Collections"></div>
+        <div class="library-list">
+          <button id="libraryNewCollection" onclick="newCollection()" disabled>New collection</button>
+          <button id="libraryRenameCollection" onclick="renameCollection()" hidden>Rename collection</button>
+          <button class="danger" id="libraryDeleteCollection" onclick="deleteCollection()" hidden>Delete collection</button>
+          <button id="libraryRestore" onclick="openRestore()" disabled>Restore…</button>
+          <label title="Save the original in a .backups folder before cropping or deleting"><input type="checkbox" id="libraryBackups" onchange="setBackups(this.checked)" checked disabled> Keep backups</label>
+        </div>
+      </div>
       <section class="library-main">
         <div class="library-bar">
           <strong id="libraryTitle"></strong>
@@ -2222,6 +2242,16 @@
           <button id="libraryLoad" onclick="openActionDialog('load')" disabled>Load</button>
           <button id="libraryUnload" onclick="openActionDialog('unload')" disabled>Unload</button>
           <button class="primary" id="libraryReplace" onclick="openActionDialog('show')" disabled>Replace TV contents</button>
+        </div>
+        <div class="library-bar" aria-label="File actions">
+          <button id="libraryAdd" onclick="$('libraryFileInput').click()" disabled>Add images…</button>
+          <input type="file" id="libraryFileInput" accept=".jpg,.jpeg,.png,image/jpeg,image/png" multiple hidden>
+          <button id="libraryCrop" onclick="cropSelected()" disabled>Crop</button>
+          <button id="libraryRename" onclick="renameSelected()" disabled>Rename</button>
+          <button id="libraryMove" onclick="transferSelected('move')" disabled>Move to…</button>
+          <button id="libraryCopy" onclick="transferSelected('copy')" disabled>Copy to…</button>
+          <button class="danger" id="libraryDelete" onclick="deleteSelectedFiles()" disabled>Delete</button>
+          <button id="libraryUpdate" onclick="openActionDialog('update')" hidden>Update TV copy</button>
         </div>
         <div class="library-status" id="libraryTvState"></div>
         <div class="library-grid" id="libraryGrid"></div>
@@ -5425,6 +5455,7 @@
   </script>
   <button class="jump-to-current" id="jumpToCurrentFab" title="Scroll to the artwork currently on your TV" onclick="scrollToCurrentCard()"><span class="fab-icon">▶</span><span class="fab-label">Now showing</span></button>
   <script src="/assets/js/library.js"></script>
+  <script src="/assets/js/library_manage.js"></script>
   <script src="/assets/js/slideshow.js"></script>
 </body>
 </html>
